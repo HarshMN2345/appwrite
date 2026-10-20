@@ -32,6 +32,7 @@ use Utopia\Platform\Action;
 use Utopia\Platform\Scope\HTTP;
 use Utopia\Psr7\Stream;
 use Utopia\Storage\Device;
+use Utopia\Storage\Exception\NotFoundException as StorageNotFoundException;
 
 abstract class Base extends Action
 {
@@ -250,25 +251,25 @@ abstract class Base extends Action
         $cache->save($this->multipartStateKey($project, (string) $upload['uploadId']), \json_encode($upload, JSON_THROW_ON_ERROR));
     }
 
-    protected function uploadMultipartPart(Cache $cache, Document $project, Device $deviceForFiles, array $upload, int $partNumber, string $body, string $etag): array
+    protected function uploadMultipartPart(Device $deviceForFiles, array $upload, int $partNumber, string $body, string $etag): array
     {
         $metadata = $upload['metadata'] ?? [];
         $deviceMetadata = $metadata['device'] ?? [];
-        $chunks = \max(2, (int) ($deviceMetadata['chunks'] ?? 0) + 2, $partNumber + 1);
-        $deviceForFiles->upload(
-            new Stream($body),
-            (string) $upload['path'],
-            (string) ($upload['contentType'] ?? 'application/octet-stream'),
-            $partNumber,
-            $chunks,
-            $deviceMetadata
-        );
+        try {
+            $deviceForFiles->uploadChunk(
+                new Stream($body),
+                (string) $upload['path'],
+                $partNumber,
+                0, // The final part count is chosen by CompleteMultipartUpload.
+                $deviceMetadata
+            );
+        } catch (StorageNotFoundException) {
+            throw new AppwriteException(AppwriteException::GENERAL_ARGUMENT_INVALID, 'Multipart upload not found.');
+        }
 
         $metadata['device'] = $deviceMetadata;
         $upload['metadata'] = $metadata;
         $upload['parts'][(string) $partNumber] = ['etag' => $etag, 'size' => \strlen($body)];
-        $this->saveMultipartUpload($cache, $project, $upload);
-
         return $upload;
     }
 
@@ -792,7 +793,14 @@ abstract class Base extends Action
             throw new AppwriteException(AppwriteException::GENERAL_ARGUMENT_INVALID, "Multiple files match S3 object key '{$key}'.");
         }
 
-        return $files[0] ?? null;
+        $file = $files[0] ?? null;
+        if ($file !== null && $file->getAttribute('chunksTotal', 1) !== $file->getAttribute('chunksUploaded', 0)) {
+            // Native completion owns this unpublished path until its metadata is
+            // committed. S3 writers must retry rather than replace that document
+            // between its generation check and publication.
+            throw new Contention('A native file upload is still in progress');
+        }
+        return $file;
     }
 
     /**
