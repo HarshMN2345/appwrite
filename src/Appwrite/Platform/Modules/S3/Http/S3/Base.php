@@ -251,10 +251,12 @@ abstract class Base extends Action
         $cache->save($this->multipartStateKey($project, (string) $upload['uploadId']), \json_encode($upload, JSON_THROW_ON_ERROR));
     }
 
+    /**
+     * @return array{etag: string, size: int, device: bool|string}
+     */
     protected function uploadMultipartPart(Device $deviceForFiles, array $upload, int $partNumber, string $body, string $etag): array
     {
-        $metadata = $upload['metadata'] ?? [];
-        $deviceMetadata = $metadata['device'] ?? [];
+        $deviceMetadata = $upload['metadata']['device'] ?? [];
         try {
             $deviceForFiles->uploadChunk(
                 new Stream($body),
@@ -267,10 +269,7 @@ abstract class Base extends Action
             throw new AppwriteException(AppwriteException::GENERAL_ARGUMENT_INVALID, 'Multipart upload not found.');
         }
 
-        $metadata['device'] = $deviceMetadata;
-        $upload['metadata'] = $metadata;
-        $upload['parts'][(string) $partNumber] = ['etag' => $etag, 'size' => \strlen($body)];
-        return $upload;
+        return ['etag' => $etag, 'size' => \strlen($body), 'device' => $deviceMetadata['parts'][$partNumber]];
     }
 
     protected function unsupportedSubresource(Request $request): bool

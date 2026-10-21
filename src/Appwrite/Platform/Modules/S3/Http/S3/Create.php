@@ -145,7 +145,12 @@ class Create extends Base
                     $upload = $this->multipartUploadForBucket($cache, $project, $uploadId, $bucketId, $key);
                     if (empty($upload['metadata']['device']['uploadId'])) {
                         // Local chunks share a directory: keep transfer and abort serialized.
-                        $upload = $this->uploadMultipartPart($deviceForFiles, $upload, $partNumber, $body, $etag);
+                        $receipt = $this->uploadMultipartPart($deviceForFiles, $upload, $partNumber, $body, $etag);
+                        $upload['parts'][$partNumber] = ['etag' => $receipt['etag'], 'size' => $receipt['size']];
+                        $upload['metadata']['device']['parts'][$partNumber] = $receipt['device'];
+                        $upload['metadata']['device']['chunks'] = \count($upload['metadata']['device']['parts']);
+                        // Gateway parts are fragments, even when completion selects one.
+                        $upload['metadata']['device']['whole'] = false;
                         $this->saveMultipartUpload($cache, $project, $upload);
                         return null;
                     }
@@ -156,18 +161,18 @@ class Create extends Base
                     if (!$partLock->refresh()) {
                         throw new Contention('Part lease lost before transfer');
                     }
-                    $transferred = $this->uploadMultipartPart($deviceForFiles, $upload, $partNumber, $body, $etag);
+                    $receipt = $this->uploadMultipartPart($deviceForFiles, $upload, $partNumber, $body, $etag);
                     if (!$partLock->isHeld()) {
                         throw new Contention('Part lease lost after transfer');
                     }
-                    $locks($lockKey, 600, function () use ($cache, $project, $uploadId, $bucketId, $key, $partNumber, $transferred, $partLock): void {
+                    $locks($lockKey, 600, function () use ($cache, $project, $uploadId, $bucketId, $key, $partNumber, $receipt, $partLock): void {
                         if (!$partLock->refresh()) {
                             throw new Contention('Part lease lost before recording completion');
                         }
                         // Abort removes the state. Never recreate it from the transfer's snapshot.
                         $current = $this->multipartUploadForBucket($cache, $project, $uploadId, $bucketId, $key);
-                        $current['parts'][$partNumber] = $transferred['parts'][$partNumber];
-                        $current['metadata']['device']['parts'][$partNumber] = $transferred['metadata']['device']['parts'][$partNumber];
+                        $current['parts'][$partNumber] = ['etag' => $receipt['etag'], 'size' => $receipt['size']];
+                        $current['metadata']['device']['parts'][$partNumber] = $receipt['device'];
                         $current['metadata']['device']['chunks'] = \count($current['metadata']['device']['parts']);
                         $this->saveMultipartUpload($cache, $project, $current);
                     }, timeout: 120.0);
